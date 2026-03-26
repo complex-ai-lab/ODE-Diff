@@ -27,5 +27,5 @@ For training, you can reproduce the experimental results of all benchmarks by ru
 
 ### Generation
 ```bash
-(myenv) $ python main.py --name ode-diff --config_file ./Config/data1_Ours.yaml --gpu 0 --sample 0 --milestone 10
+(myenv) $ python main.py --name ode-diff --config_file ./Config/data1_Ours.yaml --gpu 0 --sample 0 --milestone 10 --w_d 0 --w_v 0
 ```
