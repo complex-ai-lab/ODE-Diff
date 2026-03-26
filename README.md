@@ -21,11 +21,11 @@ The full libraries list is provided as a `requirements.txt` in this repo. Please
 For training, you can reproduce the experimental results of all benchmarks by runing
 
 ~~~bash
-(myenv) $ python main.py --name diffpo --config_file ./Config/scenario-modeling.yaml --gpu 0 --train
+(myenv) $ python main.py --name ode-diff --config_file ./Config/data1_Ours.yaml --gpu 0 --train
 ~~~
 
 
 ### Generation
 ```bash
-(myenv) $ python main.py --name diffpo --config_file ./Config/scenario-modeling.yaml --gpu 0 --sample 0 --milestone 10
+(myenv) $ python main.py --name ode-diff --config_file ./Config/data1_Ours.yaml --gpu 0 --sample 0 --milestone 10
 ```
