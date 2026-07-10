@@ -95,11 +95,26 @@ def main():
         gt_dataloader, gt_dataset = gt_dataloader_info['dataloader'], gt_dataloader_info['dataset']
         expf_dataloader, expf_dataset = expf_dataloader_info['dataloader'], expf_dataloader_info['dataset']
         expc_dataloader, expc_dataset = expc_dataloader_info['dataloader'], expc_dataloader_info['dataset']
-        samples = trainer.sample(num=len(dataset), size_every=121, dataloader_a=dataloader, dataloader_gt=gt_dataloader, dataloader_expf=expf_dataloader, dataloader_expc=expc_dataloader, w_v=args.w_v, w_d=args.w_d, shape=[52, 1])
+        generation_config = config.get('generation', {})
+        num_samples_per_condition = generation_config.get('num_samples_per_condition', 10)
+        draw_batch_size = generation_config.get('draw_batch_size', num_samples_per_condition)
+        output_prefix = generation_config.get('output_prefix', args.name)
+        samples = trainer.sample(
+            num=len(dataset),
+            dataloader_a=dataloader,
+            dataloader_gt=gt_dataloader,
+            dataloader_expf=expf_dataloader,
+            dataloader_expc=expc_dataloader,
+            w_v=args.w_v,
+            w_d=args.w_d,
+            shape=[dataset.window, dataset.var_num],
+            num_samples_per_condition=num_samples_per_condition,
+            draw_batch_size=draw_batch_size,
+        )
         if dataset_info.auto_norm:
             samples = unnormalize_to_zero_to_one(samples)
             samples = dataset_info.scaler.inverse_transform(samples.reshape(-1, samples.shape[-1])).reshape(samples.shape)
-        np.save(os.path.join(args.save_dir, f'ddpm_fake_{args.name}_{args.seed}_cdir_{args.w_v}_{args.w_d}.npy'), samples)
+        np.save(os.path.join(args.save_dir, f'{output_prefix}_{args.seed}_cdir_{args.w_v}_{args.w_d}.npy'), samples)
 
 if __name__ == '__main__':
     main()

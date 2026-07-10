@@ -36,8 +36,13 @@ solver:
       threshold: 1.0e-1
       threshold_mode: rel
       warmup_lr: 8.0e-4
-      warmup: 500 
+      warmup: 500
       verbose: False
+
+generation:
+  num_samples_per_condition: 10
+  draw_batch_size: 10
+  output_prefix: ode-diff
 
 dataloader:
   train_dataset:

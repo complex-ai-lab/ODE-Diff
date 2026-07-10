@@ -147,20 +147,27 @@ class Diffusion_TS(nn.Module):
         return pred_noise, x_start
 
     def p_mean_variance(self, x, t, a, gt, expf, expc, w_v, w_d, clip_denoised=True, gamma=1.0):
-        _, x_start_cond = self.model_predictions(x, t, a)
-        _, x_start_uncond = self.model_predictions(x, t, -torch.ones_like(a))
+        guidance_enabled = w_v != 0 or w_d != 0
+        if guidance_enabled:
+            _, x_start_cond = self.model_predictions(x, t, a)
+            _, x_start_uncond = self.model_predictions(x, t, -torch.ones_like(a))
+        else:
+            with torch.no_grad():
+                _, x_start_cond = self.model_predictions(x, t, a)
+                _, x_start_uncond = self.model_predictions(x, t, -torch.ones_like(a))
         x_start = (1+gamma) * x_start_cond - gamma * x_start_uncond
         if clip_denoised:
             x_start.clamp_(-1., 1.)
-        
-        x_start = x_start.clone().detach().requires_grad_(True)
-        expf, expc = align_expert_by_peak_shift_after_t_numpy(expf.cpu().numpy(), gt.cpu().numpy(), expc.cpu().numpy())
-        expf, expc = torch.tensor(expf, device=x.device), torch.tensor(expc, device=x.device)
-        expert_loss_cval = directional_sign_loss(x_start, gt, expc, expf)
-        expert_loss_cdir = second_order_direction_loss(x_start, gt, expc, expf)
-        grad_cval = torch.autograd.grad(expert_loss_cval, x_start, retain_graph=True)[0]
-        grad_cdir = torch.autograd.grad(expert_loss_cdir, x_start, retain_graph=True)[0]
-        x_start = x_start -w_v*grad_cval - w_d * grad_cdir
+
+        if guidance_enabled:
+            x_start = x_start.clone().detach().requires_grad_(True)
+            expert_loss_cval = directional_sign_loss(x_start, gt, expc, expf)
+            expert_loss_cdir = second_order_direction_loss(x_start, gt, expc, expf)
+            grad_cval = torch.autograd.grad(expert_loss_cval, x_start, retain_graph=True)[0]
+            grad_cdir = torch.autograd.grad(expert_loss_cdir, x_start, retain_graph=True)[0]
+            x_start = x_start - w_v * grad_cval - w_d * grad_cdir
+        else:
+            x_start = x_start.detach()
 
         model_mean, posterior_variance, posterior_log_variance = \
             self.q_posterior(x_start=x_start, x_t=x, t=t)
@@ -179,6 +186,14 @@ class Diffusion_TS(nn.Module):
     def sample(self, shape, a, gt, expf, expc, w_v, w_d):
         device = self.betas.device
         img = torch.randn(shape, device=device)
+        if w_v != 0 or w_d != 0:
+            expf, expc = align_expert_by_peak_shift_after_t_numpy(
+                expf.detach().cpu().numpy(),
+                gt.detach().cpu().numpy(),
+                expc.detach().cpu().numpy(),
+            )
+            expf = torch.as_tensor(expf, device=device, dtype=gt.dtype)
+            expc = torch.as_tensor(expc, device=device, dtype=gt.dtype)
         for t in tqdm(reversed(range(0, self.num_timesteps)),
                       desc='sampling loop time step', total=self.num_timesteps):
             img, _ = self.p_sample(img, t, a, gt, expf, expc, w_v, w_d)
@@ -214,8 +229,9 @@ class Diffusion_TS(nn.Module):
 
         return img
 
-    def generate_mts(self, a, gt, expf, expc, w_v, w_d, batch_size=16):
+    def generate_mts(self, a, gt, expf, expc, w_v, w_d):
         feature_size, seq_length = self.feature_size, self.seq_length
+        batch_size = a.shape[0]
         sample_fn = self.fast_sample if self.fast_sampling else self.sample
         return sample_fn((batch_size, seq_length, feature_size), a, gt, expf, expc, w_v=w_v, w_d=w_d)
 

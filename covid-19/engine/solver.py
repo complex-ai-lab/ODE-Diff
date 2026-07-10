@@ -128,15 +128,29 @@ class Trainer(object):
         if self.logger is not None:
             self.logger.log_info('Training done, time: {:.2f}'.format(time.time() - tic))
 
-    def sample(self, num, size_every, dataloader_a, dataloader_gt, dataloader_expf, dataloader_expc, w_v, w_d, shape=None):
+    def sample(self, num, dataloader_a, dataloader_gt, dataloader_expf, dataloader_expc, w_v, w_d,
+               shape=None, num_samples_per_condition=1, draw_batch_size=1):
         if self.logger is not None:
             tic = time.time()
             self.logger.log_info('Begin to sample...')
-        samples = np.empty([0, shape[0], shape[1]])
-        num_cycle = int(num // size_every) + 1
 
+        if shape is None:
+            raise ValueError('shape must be provided for sampling.')
 
-        for aa in range(10):
+        num_samples_per_condition = int(num_samples_per_condition)
+        draw_batch_size = int(draw_batch_size)
+        if num_samples_per_condition < 1:
+            raise ValueError('num_samples_per_condition must be >= 1.')
+        if draw_batch_size < 1:
+            raise ValueError('draw_batch_size must be >= 1.')
+
+        samples = []
+        generated = 0
+
+        while generated < num_samples_per_condition:
+            current_draws = min(draw_batch_size, num_samples_per_condition - generated)
+            draw_parts = [[] for _ in range(current_draws)]
+
             for idx, (x_a, x_gt, x_expf, x_expc) in enumerate(zip(dataloader_a, dataloader_gt, dataloader_expf, dataloader_expc)):
                 print('sample number check: ', idx)
                 print('sample a: ', x_a.shape)
@@ -144,13 +158,37 @@ class Trainer(object):
                 x_gt = x_gt.to(self.device)
                 x_expf = x_expf.to(self.device)
                 x_expc = x_expc.to(self.device)
-                sample = self.ema.ema_model.generate_mts(a=x_a, gt=x_gt, expf=x_expf, expc=x_expc, w_v=w_v, w_d=w_d, batch_size=size_every)
-                samples = np.row_stack([samples, sample.detach().cpu().numpy()])
+
+                repeat_dims = [current_draws] + [1] * (x_a.dim() - 1)
+                x_a = x_a.repeat(*repeat_dims)
+                x_gt = x_gt.repeat(*repeat_dims)
+                x_expf = x_expf.repeat(*repeat_dims)
+                x_expc = x_expc.repeat(*repeat_dims)
+
+                sample = self.ema.ema_model.generate_mts(
+                    a=x_a,
+                    gt=x_gt,
+                    expf=x_expf,
+                    expc=x_expc,
+                    w_v=w_v,
+                    w_d=w_d,
+                )
+                batch_size = sample.shape[0] // current_draws
+                sample = sample.detach().cpu().numpy().reshape(current_draws, batch_size, shape[0], shape[1])
+                for draw_idx in range(current_draws):
+                    draw_parts[draw_idx].append(sample[draw_idx])
                 torch.cuda.empty_cache()
+
+            for draw_idx in range(current_draws):
+                draw_samples = np.concatenate(draw_parts[draw_idx], axis=0)
+                if draw_samples.shape[0] != num:
+                    raise ValueError(f'Generated {draw_samples.shape[0]} samples, expected {num}.')
+                samples.append(draw_samples)
+            generated += current_draws
 
         if self.logger is not None:
             self.logger.log_info('Sampling done, time: {:.2f}'.format(time.time() - tic))
-        return samples
+        return np.concatenate(samples, axis=0)
 
     def restore(self, raw_dataloader, shape=None, coef=1e-1, stepsize=1e-1, sampling_steps=50):
         if self.logger is not None:
