@@ -69,7 +69,7 @@ dataloader:
     params:
       name: data1_DiffPO_y
       proportion: 1.0  # rate
-      data_root: ./Data/datasets/data1/hybrid_y_f_norm.csv
+      data_root: ./Data/datasets/data1/hybrid_y_c_norm.csv
       window: 52  # seq_length
       save2npy: True
       neg_one_to_one: True

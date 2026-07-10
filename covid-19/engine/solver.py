@@ -136,7 +136,7 @@ class Trainer(object):
         num_cycle = int(num // size_every) + 1
 
 
-        for aa in range(100):
+        for aa in range(10):
             for idx, (x_a, x_gt, x_expf, x_expc) in enumerate(zip(dataloader_a, dataloader_gt, dataloader_expf, dataloader_expc)):
                 print('sample number check: ', idx)
                 print('sample a: ', x_a.shape)
