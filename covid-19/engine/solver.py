@@ -170,8 +170,11 @@ class Trainer(object):
                     gt=x_gt,
                     expf=x_expf,
                     expc=x_expc,
-                    w_v=w_v,
-                    w_d=w_d,
+                    # The expert losses are averaged over the batch. Repeating
+                    # conditions to sample multiple draws in one call would
+                    # otherwise shrink the guidance gradient by current_draws.
+                    w_v=w_v * current_draws,
+                    w_d=w_d * current_draws,
                 )
                 batch_size = sample.shape[0] // current_draws
                 sample = sample.detach().cpu().numpy().reshape(current_draws, batch_size, shape[0], shape[1])
