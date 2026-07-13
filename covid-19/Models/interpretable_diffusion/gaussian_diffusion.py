@@ -146,7 +146,115 @@ class Diffusion_TS(nn.Module):
         pred_noise = self.predict_noise_from_start(x, t, x_start)
         return pred_noise, x_start
 
-    def p_mean_variance(self, x, t, a, gt, expf, expc, w_v, w_d, clip_denoised=True, gamma=1.0):
+    def guidance_schedule_scale(self, t, guidance_schedule=None):
+        if not guidance_schedule:
+            return torch.ones_like(t, dtype=torch.float32)
+
+        mode = guidance_schedule.get('mode', 'none')
+        if mode in {None, 'none'}:
+            return torch.ones_like(t, dtype=torch.float32)
+        if mode not in {'weak_strong_weak', 'wsw'}:
+            raise ValueError(f'Unknown guidance schedule mode: {mode}')
+
+        low_scale = float(guidance_schedule.get('low_scale', 0.2))
+        start_fraction = float(guidance_schedule.get('start_fraction', 0.2))
+        end_fraction = float(guidance_schedule.get('end_fraction', 0.8))
+        if not 0.0 <= low_scale <= 1.0:
+            raise ValueError('guidance_schedule.low_scale must be in [0, 1].')
+        if not 0.0 <= start_fraction < end_fraction <= 1.0:
+            raise ValueError('guidance_schedule requires 0 <= start_fraction < end_fraction <= 1.')
+
+        progress = 1.0 - t.float() / max(self.num_timesteps - 1, 1)
+        scale = torch.ones_like(progress, dtype=torch.float32)
+
+        if start_fraction > 0:
+            warmup = progress < start_fraction
+            scale = torch.where(
+                warmup,
+                low_scale + (1.0 - low_scale) * progress / start_fraction,
+                scale,
+            )
+
+        if end_fraction < 1:
+            cooldown = progress > end_fraction
+            cooldown_progress = (progress - end_fraction) / (1.0 - end_fraction)
+            scale = torch.where(
+                cooldown,
+                1.0 - (1.0 - low_scale) * cooldown_progress,
+                scale,
+            )
+
+        return scale.clamp(min=low_scale, max=1.0)
+
+    def pairwise_draw_l1(self, values, num_draws):
+        if num_draws < 2:
+            return None
+        if values.shape[0] % num_draws != 0:
+            raise ValueError(f'Batch size {values.shape[0]} is not divisible by num_draws={num_draws}.')
+
+        num_conditions = values.shape[0] // num_draws
+        values = values.reshape(num_draws, num_conditions, -1)
+        distances = []
+        for draw_i in range(num_draws):
+            for draw_j in range(draw_i + 1, num_draws):
+                distances.append((values[draw_i] - values[draw_j]).abs().mean(dim=-1))
+        return torch.stack(distances, dim=0).mean(dim=0)
+
+    def apply_diversity_regularizer(self, x_pre, x_guided, delta_expert, num_draws=None,
+                                    diversity_regularizer=None, x_reference=None):
+        if not diversity_regularizer:
+            return x_guided
+
+        mode = diversity_regularizer.get('mode', 'none')
+        if mode in {None, 'none'}:
+            return x_guided
+        if mode not in {'retain_pairwise', 'retain_pairwise_shadow'}:
+            raise ValueError(f'Unknown diversity regularizer mode: {mode}')
+        if num_draws is None or int(num_draws) < 2:
+            return x_guided
+
+        num_draws = int(num_draws)
+        retain_ratio = float(diversity_regularizer.get('retain_ratio', 0.5))
+        alpha = float(diversity_regularizer.get('alpha', 0.1))
+        strength = float(diversity_regularizer.get('strength', 1.0))
+        eps = float(diversity_regularizer.get('eps', 1.0e-12))
+        if retain_ratio < 0:
+            raise ValueError('diversity_regularizer.retain_ratio must be >= 0.')
+        if strength < 0:
+            raise ValueError('diversity_regularizer.strength must be >= 0.')
+
+        if mode == 'retain_pairwise_shadow':
+            if x_reference is None:
+                return x_guided
+            reference_values = x_reference.detach()
+        else:
+            reference_values = x_pre
+
+        with torch.no_grad():
+            reference_distance = self.pairwise_draw_l1(reference_values, num_draws)
+        guided_distance = self.pairwise_draw_l1(x_guided, num_draws)
+        if reference_distance is None or guided_distance is None:
+            return x_guided
+
+        shortfall = F.relu(retain_ratio * reference_distance - guided_distance)
+        diversity_loss = (shortfall ** 2).mean()
+        grad_div = torch.autograd.grad(diversity_loss, x_guided, retain_graph=False, allow_unused=True)[0]
+        if grad_div is None:
+            return x_guided
+
+        delta_div = -strength * grad_div
+        if alpha >= 0:
+            with torch.no_grad():
+                max_norm = alpha * delta_expert.detach().norm()
+                div_norm = delta_div.detach().norm()
+                scale = torch.clamp(max_norm / (div_norm + eps), max=1.0)
+            delta_div = delta_div * scale
+        return x_guided + delta_div
+
+    def p_mean_variance(self, x, t, a, gt, expf, expc, w_v, w_d, guidance_schedule=None,
+                        diversity_regularizer=None, num_guidance_draws=None, diversity_reference=None,
+                        clip_denoised=True, gamma=1.0):
+        schedule_scale = self.guidance_schedule_scale(t, guidance_schedule).to(x.device)
         guidance_enabled = w_v != 0 or w_d != 0
         if guidance_enabled:
             _, x_start_cond = self.model_predictions(x, t, a)
@@ -161,11 +269,23 @@ class Diffusion_TS(nn.Module):
 
         if guidance_enabled:
             x_start = x_start.clone().detach().requires_grad_(True)
+            x_pre = x_start.detach()
             expert_loss_cval = directional_sign_loss(x_start, gt, expc, expf)
             expert_loss_cdir = second_order_direction_loss(x_start, gt, expc, expf)
             grad_cval = torch.autograd.grad(expert_loss_cval, x_start, retain_graph=True)[0]
             grad_cdir = torch.autograd.grad(expert_loss_cdir, x_start, retain_graph=True)[0]
-            x_start = x_start - w_v * grad_cval - w_d * grad_cdir
+            view_shape = (schedule_scale.shape[0],) + (1,) * (x_start.dim() - 1)
+            schedule_scale = schedule_scale.view(view_shape)
+            x_guided = x_start - (w_v * schedule_scale) * grad_cval - (w_d * schedule_scale) * grad_cdir
+            delta_expert = x_guided.detach() - x_pre
+            x_start = self.apply_diversity_regularizer(
+                x_pre=x_pre,
+                x_guided=x_guided,
+                delta_expert=delta_expert,
+                num_draws=num_guidance_draws,
+                diversity_regularizer=diversity_regularizer,
+                x_reference=diversity_reference,
+            )
         else:
             x_start = x_start.detach()
 
@@ -173,19 +293,40 @@ class Diffusion_TS(nn.Module):
             self.q_posterior(x_start=x_start, x_t=x, t=t)
         return model_mean, posterior_variance, posterior_log_variance, x_start
 
-    def p_sample(self, x, t: int, a, gt, expf, expc, w_v, w_d, clip_denoised=True):
+    def p_sample(self, x, t: int, a, gt, expf, expc, w_v, w_d, guidance_schedule=None,
+                 diversity_regularizer=None, num_guidance_draws=None, diversity_reference=None,
+                 noise=None, clip_denoised=True):
         batched_times = torch.full((x.shape[0],), t, device=x.device, dtype=torch.long)
         model_mean, _, model_log_variance, x_start = \
-            self.p_mean_variance(x=x, t=batched_times, a=a, gt=gt, expf=expf, expc=expc, w_v=w_v, w_d=w_d, clip_denoised=clip_denoised)
+            self.p_mean_variance(
+                x=x,
+                t=batched_times,
+                a=a,
+                gt=gt,
+                expf=expf,
+                expc=expc,
+                w_v=w_v,
+                w_d=w_d,
+                guidance_schedule=guidance_schedule,
+                diversity_regularizer=diversity_regularizer,
+                num_guidance_draws=num_guidance_draws,
+                diversity_reference=diversity_reference,
+                clip_denoised=clip_denoised,
+            )
 
-        noise = torch.randn_like(x) if t > 0 else 0.  
+        if noise is None:
+            noise = torch.randn_like(x) if t > 0 else 0.
         pred_img = model_mean + (0.5 * model_log_variance).exp() * noise
         return pred_img, x_start
 
     # @torch.no_grad()
-    def sample(self, shape, a, gt, expf, expc, w_v, w_d):
+    def sample(self, shape, a, gt, expf, expc, w_v, w_d, guidance_schedule=None,
+               diversity_regularizer=None, num_guidance_draws=None):
         device = self.betas.device
         img = torch.randn(shape, device=device)
+        diversity_mode = (diversity_regularizer or {}).get('mode', 'none')
+        use_shadow_reference = diversity_mode == 'retain_pairwise_shadow' and (w_v != 0 or w_d != 0)
+        img_shadow = img.clone() if use_shadow_reference else None
         if w_v != 0 or w_d != 0:
             expf, expc = align_expert_by_peak_shift_after_t_numpy(
                 expf.detach().cpu().numpy(),
@@ -196,7 +337,38 @@ class Diffusion_TS(nn.Module):
             expc = torch.as_tensor(expc, device=device, dtype=gt.dtype)
         for t in tqdm(reversed(range(0, self.num_timesteps)),
                       desc='sampling loop time step', total=self.num_timesteps):
-            img, _ = self.p_sample(img, t, a, gt, expf, expc, w_v, w_d)
+            noise = torch.randn_like(img) if t > 0 else 0.
+            diversity_reference = None
+            if use_shadow_reference:
+                img_shadow, diversity_reference = self.p_sample(
+                    img_shadow,
+                    t,
+                    a,
+                    gt,
+                    expf,
+                    expc,
+                    0.,
+                    0.,
+                    guidance_schedule=None,
+                    diversity_regularizer=None,
+                    num_guidance_draws=None,
+                    noise=noise,
+                )
+            img, _ = self.p_sample(
+                img,
+                t,
+                a,
+                gt,
+                expf,
+                expc,
+                w_v,
+                w_d,
+                guidance_schedule=guidance_schedule,
+                diversity_regularizer=diversity_regularizer,
+                num_guidance_draws=num_guidance_draws,
+                diversity_reference=diversity_reference,
+                noise=noise,
+            )
         return img
 
     @torch.no_grad()
@@ -229,11 +401,23 @@ class Diffusion_TS(nn.Module):
 
         return img
 
-    def generate_mts(self, a, gt, expf, expc, w_v, w_d):
+    def generate_mts(self, a, gt, expf, expc, w_v, w_d, guidance_schedule=None,
+                     diversity_regularizer=None, num_guidance_draws=None):
         feature_size, seq_length = self.feature_size, self.seq_length
         batch_size = a.shape[0]
         sample_fn = self.fast_sample if self.fast_sampling else self.sample
-        return sample_fn((batch_size, seq_length, feature_size), a, gt, expf, expc, w_v=w_v, w_d=w_d)
+        return sample_fn(
+            (batch_size, seq_length, feature_size),
+            a,
+            gt,
+            expf,
+            expc,
+            w_v=w_v,
+            w_d=w_d,
+            guidance_schedule=guidance_schedule,
+            diversity_regularizer=diversity_regularizer,
+            num_guidance_draws=num_guidance_draws,
+        )
 
     @property
     def loss_fn(self):

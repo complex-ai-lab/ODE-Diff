@@ -99,6 +99,11 @@ def main():
         num_samples_per_condition = generation_config.get('num_samples_per_condition', 10)
         draw_batch_size = generation_config.get('draw_batch_size', num_samples_per_condition)
         output_prefix = generation_config.get('output_prefix', args.name)
+        output_tag = str(generation_config.get('output_tag', '')).strip()
+        if output_tag:
+            output_prefix = f'{output_prefix}_{output_tag}'
+        guidance_schedule = generation_config.get('guidance_schedule', {'mode': 'none'})
+        diversity_regularizer = generation_config.get('diversity_regularizer', {'mode': 'none'})
         samples = trainer.sample(
             num=len(dataset),
             dataloader_a=dataloader,
@@ -110,6 +115,8 @@ def main():
             shape=[dataset.window, dataset.var_num],
             num_samples_per_condition=num_samples_per_condition,
             draw_batch_size=draw_batch_size,
+            guidance_schedule=guidance_schedule,
+            diversity_regularizer=diversity_regularizer,
         )
         if dataset_info.auto_norm:
             samples = unnormalize_to_zero_to_one(samples)

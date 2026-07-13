@@ -129,7 +129,8 @@ class Trainer(object):
             self.logger.log_info('Training done, time: {:.2f}'.format(time.time() - tic))
 
     def sample(self, num, dataloader_a, dataloader_gt, dataloader_expf, dataloader_expc, w_v, w_d,
-               shape=None, num_samples_per_condition=1, draw_batch_size=1):
+               shape=None, num_samples_per_condition=1, draw_batch_size=1, guidance_schedule=None,
+               diversity_regularizer=None):
         if self.logger is not None:
             tic = time.time()
             self.logger.log_info('Begin to sample...')
@@ -175,6 +176,9 @@ class Trainer(object):
                     # otherwise shrink the guidance gradient by current_draws.
                     w_v=w_v * current_draws,
                     w_d=w_d * current_draws,
+                    guidance_schedule=guidance_schedule,
+                    diversity_regularizer=diversity_regularizer,
+                    num_guidance_draws=current_draws,
                 )
                 batch_size = sample.shape[0] // current_draws
                 sample = sample.detach().cpu().numpy().reshape(current_draws, batch_size, shape[0], shape[1])

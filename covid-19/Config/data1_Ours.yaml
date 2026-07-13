@@ -43,6 +43,18 @@ generation:
   num_samples_per_condition: 10
   draw_batch_size: 10
   output_prefix: ode-diff
+  output_tag: ''
+  guidance_schedule:
+    mode: none
+    low_scale: 0.2
+    start_fraction: 0.2
+    end_fraction: 0.8
+  diversity_regularizer:
+    mode: none
+    retain_ratio: 0.5
+    alpha: 0.1
+    strength: 1.0
+    eps: 1.0e-12
 
 dataloader:
   train_dataset:
